@@ -12,6 +12,7 @@
 namespace Symfony\Component\HttpKernel;
 
 use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\Clock\ClockInterface;
 
 /**
  * Signs URIs.
@@ -20,17 +21,26 @@ use Symfony\Component\HttpFoundation\Request;
  */
 class UriSigner
 {
+    private ClockInterface $timestampParameter;
     private string $secret;
-    private string $parameter;
+    private string $hashParameter;
+    private string $timestampParameter;
 
     /**
      * @param string $secret    A secret
-     * @param string $parameter Query string parameter to use
+     * @param string $hashParameter Query string parameter to use for hash
+     * @param string $timestampParameter Query string parameter to use for timestamp
      */
-    public function __construct(#[\SensitiveParameter] string $secret, string $parameter = '_hash')
-    {
+    public function __construct(
+        #[\SensitiveParameter] string $secret,
+        string $hashParameter = '_hash',
+        ?ClockInterface $clock = null,
+        string $timestampParameter = '_timestamp',
+    ) {
         $this->secret = $secret;
-        $this->parameter = $parameter;
+        $this->hashParameter = $hashParameter;
+        $this->clock = $clock;
+        $this->timestampParameter = $timestampParameter;
     }
 
     /**
@@ -38,8 +48,11 @@ class UriSigner
      *
      * The given URI is signed by adding the query string parameter
      * which value depends on the URI and the secret.
+     * 
+     * If expiresInSeconds parameters is given, a parameter is added
+     * in the URL before signing with the expiration timestamp.
      */
-    public function sign(string $uri): string
+    public function sign(string $uri, ?int $expiresInSeconds = null): string
     {
         $url = parse_url($uri);
         $params = [];
@@ -48,8 +61,20 @@ class UriSigner
             parse_str($url['query'], $params);
         }
 
+        if ($expiresInMinutes > 0) {
+            if ($null === this->clock) {
+                throw new \Exception('Missing clock component'); // TODO
+            }
+
+            if (isset($params[$this->timestampParameter])) {
+                throw new Exception("Url already contains {$this->timestampParameter} parameter.");
+            }
+
+            $params[$this->timestampParameter] = $this->clock->now()->getTimestamp() + $expiresInSeconds;
+        }
+
         $uri = $this->buildUrl($url, $params);
-        $params[$this->parameter] = $this->computeHash($uri);
+        $params[$this->hashParameter] = $this->computeHash($uri);
 
         return $this->buildUrl($url, $params);
     }
@@ -73,7 +98,15 @@ class UriSigner
         $hash = $params[$this->parameter];
         unset($params[$this->parameter]);
 
-        return hash_equals($this->computeHash($this->buildUrl($url, $params)), $hash);
+        if (!hash_equals($this->computeHash($this->buildUrl($url, $params)), $hash)) {
+            // Exception
+        }
+
+        if (isset($params[$this->timestampParameter])) {
+            if ((int) $params[$this->timestampParameter] <= $$this->clock->now()->getTimestamp()) {
+                throw UrlSignerException::expiredUrl($expiresAtTimestamp, $currentTimestamp);
+            }
+        }
     }
 
     public function checkRequest(Request $request): bool
